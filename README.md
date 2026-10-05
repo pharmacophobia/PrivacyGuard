@@ -6,6 +6,14 @@ PrivacyGuard is a free, open-source Android security app that monitors network t
 
 ---
 
+## 📥 Direct APK Download & Install
+
+| Direct 1-Tap Download | Scan QR Code with Phone Camera to Install |
+| :---: | :---: |
+| [![Download APK](https://img.shields.io/badge/Download-PrivacyGuard.apk-00C853?style=for-the-badge&logo=android&logoColor=white)](https://github.com/pharmacophobia/PrivacyGuard/raw/main/PrivacyGuard.apk)<br><br>👉 **[Click here to download PrivacyGuard.apk (15 MB)](https://github.com/pharmacophobia/PrivacyGuard/raw/main/PrivacyGuard.apk)**<br><br>📦 Alternate: [Official GitHub Release v1.1.0](https://github.com/pharmacophobia/PrivacyGuard/releases/tag/v1.1.0) | <img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=https://github.com/pharmacophobia/PrivacyGuard/raw/main/PrivacyGuard.apk" width="180" height="180" alt="Scan to install APK" /><br>*(Point your phone camera to download)* |
+
+---
+
 ## ✨ Features
 
 - **📡 Real-Time Telemetry Detection** — Intercepts and classifies outbound network calls made by other apps using local `VpnService` sinkhole routing (zero root required).

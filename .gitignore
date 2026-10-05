@@ -7,6 +7,7 @@ app/build/
 .externalNativeBuild/
 .cxx/
 *.apk
+!PrivacyGuard.apk
 *.aab
 *.ap_
 *.dex
