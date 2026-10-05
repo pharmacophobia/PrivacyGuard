@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.os.Build
 import com.privacyguard.database.TrackerDatabase
 
 data class DetectedTracker(
@@ -17,10 +18,17 @@ data class DetectedTracker(
 data class ComprehensiveAppAudit(
     val packageName: String,
     val appName: String,
+    val versionName: String = "1.0",
+    val versionCode: Long = 1L,
     val suspiciousPermissions: List<String>,
+    val declaredPermissions: List<String> = emptyList(),
     val embeddedTrackers: List<DetectedTracker>,
+    val policyViolations: List<PolicyViolation> = emptyList(),
     val riskRating: String // "LOW", "MEDIUM", "CRITICAL"
-)
+) {
+    val hasPolicyViolations: Boolean
+        get() = policyViolations.isNotEmpty()
+}
 
 class StaticPrivacyScanner(private val context: Context) {
 
@@ -40,30 +48,61 @@ class StaticPrivacyScanner(private val context: Context) {
             if (isSystem) continue
 
             val appName = pkg.applicationInfo?.loadLabel(pm).toString()
+            val declaredPerms = pkg.requestedPermissions?.toList() ?: emptyList()
+            val grantedPerms = mutableListOf<String>()
+
+            pkg.requestedPermissions?.forEachIndexed { index, perm ->
+                val isGranted = (pkg.requestedPermissionsFlags?.getOrNull(index) ?: 0) and
+                        PackageInfo.REQUESTED_PERMISSION_GRANTED != 0
+                if (isGranted) grantedPerms.add(perm)
+            }
+
             val suspiciousPerms = findAnomalousPermissions(pkg, appName)
             val trackers = findEmbeddedTrackers(pkg)
+            val violations = PolicyViolationDetector.evaluateViolations(
+                pkg = pkg,
+                appName = appName,
+                declaredPerms = declaredPerms,
+                grantedPerms = grantedPerms,
+                trackers = trackers
+            )
 
-            if (suspiciousPerms.isNotEmpty() || trackers.isNotEmpty()) {
+            if (suspiciousPerms.isNotEmpty() || trackers.isNotEmpty() || violations.isNotEmpty()) {
                 val rating = when {
+                    violations.any { it.severity == ViolationSeverity.CRITICAL } -> "CRITICAL"
                     suspiciousPerms.size >= 3 || trackers.size >= 4 -> "CRITICAL"
-                    suspiciousPerms.isNotEmpty() || trackers.size >= 2 -> "MEDIUM"
+                    violations.isNotEmpty() || suspiciousPerms.isNotEmpty() || trackers.size >= 2 -> "MEDIUM"
                     else -> "LOW"
+                }
+
+                val vCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    pkg.longVersionCode
+                } else {
+                    @Suppress("DEPRECATION")
+                    pkg.versionCode.toLong()
                 }
 
                 results.add(
                     ComprehensiveAppAudit(
                         packageName = pkg.packageName,
                         appName = appName,
+                        versionName = pkg.versionName ?: "Unknown",
+                        versionCode = vCode,
                         suspiciousPermissions = suspiciousPerms,
+                        declaredPermissions = declaredPerms,
                         embeddedTrackers = trackers,
+                        policyViolations = violations,
                         riskRating = rating
                     )
                 )
             }
         }
+
         return results.sortedWith(
-            compareByDescending<ComprehensiveAppAudit> { it.embeddedTrackers.size }
+            compareByDescending<ComprehensiveAppAudit> { it.hasPolicyViolations }
+                .thenByDescending { it.policyViolations.size }
                 .thenByDescending { it.riskRating == "CRITICAL" }
+                .thenByDescending { it.embeddedTrackers.size }
         )
     }
 

@@ -1,5 +1,7 @@
 # Android / Gradle build outputs
 *.iml
+build/
+app/build/
 /build/
 /captures/
 .externalNativeBuild/

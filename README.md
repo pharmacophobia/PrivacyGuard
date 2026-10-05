@@ -1,18 +1,27 @@
-# 🛡️ PrivacyGuard — Android Telemetry Monitor
+# 🛡️ PrivacyGuard — Android Telemetry Monitor & Policy Auditor
 
-> **See exactly what your apps are secretly sending — in real time.**
+> **See exactly what your apps are secretly sending — and report policy-breaking apps in 1 tap.**
 
-PrivacyGuard is a free, open-source Android app that monitors network traffic and permissions to expose apps that are gathering telemetry you wouldn't expect. A calculator app requesting your microphone? A flashlight app phoning home with your location? PrivacyGuard catches it all.
+PrivacyGuard is a free, open-source Android security app that monitors network traffic, audits embedded SDKs, flags Google Play policy violations, and semi-automates takedown complaints. A calculator app requesting your microphone? An ad network harvesting fine GPS coordinates from a torrent client? PrivacyGuard catches it all and arms you with technical evidence to report them.
 
 ---
 
 ## ✨ Features
 
-- **📡 Real-Time Telemetry Detection** — Intercepts and classifies outbound network calls made by other apps
-- **🔍 Static Privacy Scanner** — Analyses installed apps for suspicious permission combinations (e.g. mic + background internet on a utility app)
-- **📊 Risk Dashboard** — Colour-coded risk scores for every installed app, updated live
-- **🔒 Local Sinkhole Server** — Optionally block telemetry endpoints without root
-- **📋 Detailed Reports** — Export a full privacy audit of your device
+- **📡 Real-Time Telemetry Detection** — Intercepts and classifies outbound network calls made by other apps using local `VpnService` sinkhole routing (zero root required).
+- **⚖️ Google Play Policy Violation Engine** — Scans installed apps for policy breaches:
+  - *Location Exfiltration via Ad SDKs* (InMobi, UnityAds, ironSource, AppLovin accessing fine/coarse GPS)
+  - *Background Location Abuse* (monetization/ad networks tracking location in the background)
+  - *Restricted Permissions Harvesting* (SMS & Call Log access in non-default apps)
+  - *Deceptive Sensor Surveillance* (Microphone & Camera declared in basic utility tools)
+  - *Undeclared Device Fingerprinting* (Data brokers correlating telephony state & hardware IDs)
+- **🚀 1-Tap Prepare & Report Pipeline** — Automates the reporting workflow:
+  - Compiles structured, factual policy violation briefs with package IDs, detected SDK signatures, and Google Play policy clauses.
+  - Automatically copies the legal brief to your clipboard.
+  - Deep-links directly to the target app's listing in the **Google Play Store** (ready to tap `⋮ -> Flag as inappropriate`) or opens Google's formal **Developer Policy Takedown Web Form**.
+- **🔍 Static Privacy Scanner** — Analyses installed packages for embedded commercial tracking SDKs and anomalous permission matrices.
+- **📊 Interactive Risk Dashboard** — Colour-coded risk ratings (Critical, High, Medium, Low) with filterable views for flagged policy breakers.
+- **🔒 Local Sinkhole Server** — Blocks known telemetry and advertising endpoints locally on-device.
 
 ---
 
@@ -43,11 +52,12 @@ Or download the latest APK from the [Releases](../../releases) page and sideload
 
 ## 🛠️ Tech Stack
 
-- **Language**: Kotlin
-- **UI**: Jetpack Compose + Material 3
-- **Architecture**: MVVM + ViewModel
-- **Network Monitoring**: VpnService API (no root)
-- **Scanning**: Static permission analysis + heuristic rules
+- **Language**: Kotlin 2.0.0
+- **UI**: Jetpack Compose + Material 3 (Material You)
+- **Architecture**: Clean Architecture / MVVM + StateFlow
+- **Network Monitoring**: VpnService API (Local Sinkhole DNS & SNI inspection)
+- **Static Auditing**: PackageManager heuristic analysis + Tracker Database
+- **Reporting Engine**: 1-Tap Prepare & File Intent Dispatcher (`market://details` & Google Takedown portal)
 
 ---
 
