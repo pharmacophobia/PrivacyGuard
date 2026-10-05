@@ -10,12 +10,17 @@ PrivacyGuard is a free, open-source Android security app that monitors network t
 
 | Direct 1-Tap Download | Scan QR Code with Phone Camera to Install |
 | :---: | :---: |
-| [![Download APK](https://img.shields.io/badge/Download-PrivacyGuard.apk-00C853?style=for-the-badge&logo=android&logoColor=white)](https://github.com/pharmacophobia/PrivacyGuard/raw/main/PrivacyGuard.apk)<br><br>👉 **[Click here to download PrivacyGuard.apk (15 MB)](https://github.com/pharmacophobia/PrivacyGuard/raw/main/PrivacyGuard.apk)**<br><br>📦 Alternate: [Official GitHub Release v1.1.0](https://github.com/pharmacophobia/PrivacyGuard/releases/tag/v1.1.0) | <img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=https://github.com/pharmacophobia/PrivacyGuard/raw/main/PrivacyGuard.apk" width="180" height="180" alt="Scan to install APK" /><br>*(Point your phone camera to download)* |
+| [![Download APK](https://img.shields.io/badge/Download-PrivacyGuard.apk-00C853?style=for-the-badge&logo=android&logoColor=white)](https://github.com/pharmacophobia/PrivacyGuard/raw/main/PrivacyGuard.apk)<br><br>👉 **[Click here to download PrivacyGuard.apk (15 MB)](https://github.com/pharmacophobia/PrivacyGuard/raw/main/PrivacyGuard.apk)**<br><br>📦 Alternate: [Official GitHub Release v1.2.0](https://github.com/pharmacophobia/PrivacyGuard/releases/tag/v1.2.0) | <img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=https://github.com/pharmacophobia/PrivacyGuard/raw/main/PrivacyGuard.apk" width="180" height="180" alt="Scan to install APK" /><br>*(Point your phone camera to download)* |
 
 ---
 
 ## ✨ Features
 
+- **⚡ High-Speed Non-Blocking DNS Sinkhole** — Zero internet slowdowns or connection breakage:
+  - *Isolated Host Routing*: Intercepts strictly local DNS (`10.0.0.2/32`), letting 100% of standard TCP/HTTPS and media traffic flow directly to Wi-Fi/LTE with native performance.
+  - *Multithreaded UDP Engine*: Asynchronously processes DNS queries across a concurrent worker pool so laggy domains never block the TUN loop.
+  - *Loop-Immune Protection*: Prevents Android VPN routing feedback loops with `addDisallowedApplication` and protected sockets.
+  - *Instant Resolution & Fast-Fail*: Synthetically blocks tracker domains with immediate `0.0.0.0` / `::` (<0.5ms) and fails fast with `SERVFAIL` (RCODE 2) on upstream timeouts, completely eliminating 30-second app freezes.
 - **📡 Real-Time Telemetry Detection** — Intercepts and classifies outbound network calls made by other apps using local `VpnService` sinkhole routing (zero root required).
 - **⚖️ Google Play Policy Violation Engine** — Scans installed apps for policy breaches:
   - *Location Exfiltration via Ad SDKs* (InMobi, UnityAds, ironSource, AppLovin accessing fine/coarse GPS)

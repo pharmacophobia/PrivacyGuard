@@ -26,6 +26,8 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.nio.ByteBuffer
 import java.util.UUID
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 class TelemetryMonitorVpnService : VpnService() {
@@ -34,8 +36,9 @@ class TelemetryMonitorVpnService : VpnService() {
     private val isRunning = AtomicBoolean(false)
     private var workerThread: Thread? = null
     private var sinkholeServer: TelemetrySinkholeServer? = null
-    private var dnsForwardSocket: DatagramSocket? = null
     private lateinit var uidResolver: UidResolver
+    private val outputLock = Any()
+    private var dnsExecutor: ExecutorService? = null
 
     companion object {
         private const val CHANNEL_ID = "privacy_guard_vpn"
@@ -74,6 +77,7 @@ class TelemetryMonitorVpnService : VpnService() {
 
     private fun startVpn() {
         isRunning.set(true)
+        dnsExecutor = Executors.newFixedThreadPool(8)
 
         try {
             sinkholeServer = TelemetrySinkholeServer(SINKHOLE_PORT)
@@ -82,24 +86,24 @@ class TelemetryMonitorVpnService : VpnService() {
             e.printStackTrace()
         }
 
+        // Configure DNS-Only Sinkhole:
+        // Intercept ONLY the dummy DNS IP (10.0.0.2/32), NOT 0.0.0.0/0.
+        // This ensures all standard TCP/HTTPS connections bypass the VPN tunnel and route directly
+        // over the physical Wi-Fi/LTE interfaces without speed degradation or packet dropping.
+        val builder = Builder()
+            .setSession("PrivacyGuardVPN")
+            .addAddress("10.0.0.2", 32)
+            .addDnsServer("10.0.0.2")
+            .addRoute("10.0.0.2", 32)
+            .setMtu(1500)
+            .setBlocking(true)
+
+        // Exempt our own app from the VPN to prevent infinite recursive socket loops
         try {
-            val forwardSocket = DatagramSocket().apply {
-                soTimeout = 2500
-            }
-            protect(forwardSocket)
-            dnsForwardSocket = forwardSocket
+            builder.addDisallowedApplication(packageName)
         } catch (e: Exception) {
             e.printStackTrace()
         }
-
-        // Configure VPN to intercept DNS traffic cleanly without blackholing internet
-        val builder = Builder()
-            .setSession("PrivacyGuardVPN")
-            .addAddress("10.0.0.2", 24)
-            .addDnsServer("10.0.0.2")
-            .addRoute("10.0.0.0", 24)
-            .setMtu(1500)
-            .setBlocking(true)
 
         try {
             vpnInterface = builder.establish()
@@ -133,7 +137,10 @@ class TelemetryMonitorVpnService : VpnService() {
                     if (!isRunning.get()) break
                 }
             }
-        }.apply { start() }
+        }.apply {
+            name = "PrivacyGuard-VpnWorker"
+            start()
+        }
     }
 
     private fun processPacket(packet: ByteBuffer, outputStream: FileOutputStream, totalLength: Int) {
@@ -160,27 +167,37 @@ class TelemetryMonitorVpnService : VpnService() {
                         val dnsPayloadOffset = ihl + 8
                         val dnsPayloadLen = totalLength - dnsPayloadOffset
                         if (dnsPayloadLen > 12) {
-                            val dnsSlice = ByteBuffer.wrap(raw, dnsPayloadOffset, dnsPayloadLen)
-                            val query = DnsParser.parseQuery(dnsSlice)
+                            // Copy packet slice so worker thread can continue reading immediately
+                            val packetCopy = raw.copyOf(totalLength)
+                            val srcIpBytes = raw.copyOfRange(12, 16)
+                            val dstIpBytes = raw.copyOfRange(16, 20)
 
-                            if (query != null) {
-                                handleDnsQuery(
-                                    query = query,
-                                    raw = raw,
-                                    dnsOffset = dnsPayloadOffset,
-                                    dnsLen = dnsPayloadLen,
-                                    srcIp = srcIp,
-                                    srcPort = srcPort,
-                                    dstIp = dstIp,
-                                    dstPort = dstPort,
-                                    outputStream = outputStream
-                                )
+                            val executor = dnsExecutor
+                            if (isRunning.get() && executor != null && !executor.isShutdown) {
+                                try {
+                                    executor.execute {
+                                        dispatchDnsQuery(
+                                            raw = packetCopy,
+                                            dnsOffset = dnsPayloadOffset,
+                                            dnsLen = dnsPayloadLen,
+                                            srcIpBytes = srcIpBytes,
+                                            dstIpBytes = dstIpBytes,
+                                            srcIp = srcIp,
+                                            srcPort = srcPort,
+                                            dstIp = dstIp,
+                                            dstPort = dstPort,
+                                            outputStream = outputStream
+                                        )
+                                    }
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
                             }
                         }
                     }
                 }
             }
-            6 -> { // TCP (TLS SNI)
+            6 -> { // TCP (TLS SNI inspection if any TCP reaches TUN)
                 if (totalLength >= ihl + 20) {
                     val srcPort = ((raw[ihl].toInt() and 0xFF) shl 8) or (raw[ihl + 1].toInt() and 0xFF)
                     val dstPort = ((raw[ihl + 2].toInt() and 0xFF) shl 8) or (raw[ihl + 3].toInt() and 0xFF)
@@ -201,17 +218,27 @@ class TelemetryMonitorVpnService : VpnService() {
         }
     }
 
-    private fun handleDnsQuery(
-        query: DnsQuery,
+    private fun dispatchDnsQuery(
         raw: ByteArray,
         dnsOffset: Int,
         dnsLen: Int,
+        srcIpBytes: ByteArray,
+        dstIpBytes: ByteArray,
         srcIp: String,
         srcPort: Int,
         dstIp: String,
         dstPort: Int,
         outputStream: FileOutputStream
     ) {
+        val dnsSlice = ByteBuffer.wrap(raw, dnsOffset, dnsLen)
+        val query = DnsParser.parseQuery(dnsSlice)
+
+        if (query == null) {
+            // Forward unknown DNS format upstream to preserve connectivity
+            forwardDnsUpstream(raw, dnsOffset, dnsLen, srcIpBytes, dstIpBytes, srcPort, outputStream)
+            return
+        }
+
         val domain = query.domain
         val tracker = TrackerDatabase.matchDomain(domain)
         val isTracker = tracker != null
@@ -259,9 +286,26 @@ class TelemetryMonitorVpnService : VpnService() {
         TelemetryEventHub.emitEvent(event)
 
         if (isTracker) {
-            sendDnsSinkholeResponse(raw, dnsOffset, dnsLen, srcPort, query.qType, outputStream)
+            sendDnsSinkholeResponse(
+                raw = raw,
+                dnsOffset = dnsOffset,
+                dnsLen = dnsLen,
+                srcIpBytes = srcIpBytes,
+                dstIpBytes = dstIpBytes,
+                clientPort = srcPort,
+                qType = query.qType,
+                outputStream = outputStream
+            )
         } else {
-            forwardDnsUpstream(raw, dnsOffset, dnsLen, srcPort, outputStream)
+            forwardDnsUpstream(
+                raw = raw,
+                dnsOffset = dnsOffset,
+                dnsLen = dnsLen,
+                srcIpBytes = srcIpBytes,
+                dstIpBytes = dstIpBytes,
+                clientPort = srcPort,
+                outputStream = outputStream
+            )
         }
     }
 
@@ -304,6 +348,8 @@ class TelemetryMonitorVpnService : VpnService() {
         raw: ByteArray,
         dnsOffset: Int,
         dnsLen: Int,
+        srcIpBytes: ByteArray,
+        dstIpBytes: ByteArray,
         clientPort: Int,
         qType: Int,
         outputStream: FileOutputStream
@@ -319,7 +365,7 @@ class TelemetryMonitorVpnService : VpnService() {
                 qEnd += 1 + len
             }
             qEnd += 5 // skip 0x00 and 4-byte QTYPE/QCLASS
-            val questionLen = qEnd - (dnsOffset + 12)
+            val questionLen = (qEnd - (dnsOffset + 12)).coerceAtLeast(0)
 
             if (qType == 28) {
                 // AAAA (IPv6): Return NODATA (ANCOUNT = 0) with NOERROR
@@ -331,16 +377,20 @@ class TelemetryMonitorVpnService : VpnService() {
                 dnsResp.putShort(0.toShort())      // ANCOUNT = 0
                 dnsResp.putShort(0.toShort())      // NSCOUNT
                 dnsResp.putShort(0.toShort())      // ARCOUNT
-                dnsResp.put(raw, dnsOffset + 12, questionLen)
+                if (questionLen > 0) {
+                    dnsResp.put(raw, dnsOffset + 12, questionLen)
+                }
 
                 val respPacket = buildIpUdpPacket(
-                    srcIp = byteArrayOf(10, 0, 0, 2),
-                    dstIp = byteArrayOf(10, 0, 0, 2),
+                    srcIp = dstIpBytes,
+                    dstIp = srcIpBytes,
                     srcPort = 53,
                     dstPort = clientPort,
                     payload = dnsResp.array()
                 )
-                outputStream.write(respPacket)
+                synchronized(outputLock) {
+                    outputStream.write(respPacket)
+                }
             } else {
                 // Type A (IPv4): Return 0.0.0.0 (Standard RFC Sinkhole Address)
                 val dnsResp = ByteBuffer.allocate(12 + questionLen + 16)
@@ -353,7 +403,9 @@ class TelemetryMonitorVpnService : VpnService() {
                 dnsResp.putShort(0.toShort())      // ARCOUNT
 
                 // Echo Question
-                dnsResp.put(raw, dnsOffset + 12, questionLen)
+                if (questionLen > 0) {
+                    dnsResp.put(raw, dnsOffset + 12, questionLen)
+                }
 
                 // Answer: 0.0.0.0
                 dnsResp.putShort(0xC00C.toShort()) // Pointer to domain name in question
@@ -367,13 +419,15 @@ class TelemetryMonitorVpnService : VpnService() {
                 dnsResp.put(0.toByte())
 
                 val respPacket = buildIpUdpPacket(
-                    srcIp = byteArrayOf(10, 0, 0, 2),
-                    dstIp = byteArrayOf(10, 0, 0, 2),
+                    srcIp = dstIpBytes,
+                    dstIp = srcIpBytes,
                     srcPort = 53,
                     dstPort = clientPort,
                     payload = dnsResp.array()
                 )
-                outputStream.write(respPacket)
+                synchronized(outputLock) {
+                    outputStream.write(respPacket)
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -384,49 +438,136 @@ class TelemetryMonitorVpnService : VpnService() {
         raw: ByteArray,
         dnsOffset: Int,
         dnsLen: Int,
+        srcIpBytes: ByteArray,
+        dstIpBytes: ByteArray,
         clientPort: Int,
         outputStream: FileOutputStream
     ) {
-        val socket = dnsForwardSocket ?: return
+        var resolved = false
+        var respData: ByteArray? = null
+
+        // 1. Try Primary DNS (Cloudflare 1.1.1.1)
         try {
-            val forwardPacket = DatagramPacket(raw, dnsOffset, dnsLen, PRIMARY_DNS, 53)
-            socket.send(forwardPacket)
-
-            val respBuf = ByteArray(1500)
-            val respPacket = DatagramPacket(respBuf, respBuf.size)
-            socket.receive(respPacket)
-
-            val dnsData = respBuf.copyOf(respPacket.length)
-            val fullPacket = buildIpUdpPacket(
-                srcIp = byteArrayOf(10, 0, 0, 2),
-                dstIp = byteArrayOf(10, 0, 0, 2),
-                srcPort = 53,
-                dstPort = clientPort,
-                payload = dnsData
-            )
-            outputStream.write(fullPacket)
-        } catch (e: Exception) {
-            // Fallback DNS
-            try {
-                val fallbackPacket = DatagramPacket(raw, dnsOffset, dnsLen, FALLBACK_DNS, 53)
-                socket.send(fallbackPacket)
+            DatagramSocket().use { socket ->
+                protect(socket)
+                socket.soTimeout = 1200
+                val forwardPacket = DatagramPacket(raw, dnsOffset, dnsLen, PRIMARY_DNS, 53)
+                socket.send(forwardPacket)
 
                 val respBuf = ByteArray(1500)
                 val respPacket = DatagramPacket(respBuf, respBuf.size)
                 socket.receive(respPacket)
+                respData = respBuf.copyOf(respPacket.length)
+                resolved = true
+            }
+        } catch (e: Exception) {
+            // Primary timed out or unreachable, try fallback
+        }
 
-                val dnsData = respBuf.copyOf(respPacket.length)
+        // 2. Try Fallback DNS (Google 8.8.8.8)
+        if (!resolved) {
+            try {
+                DatagramSocket().use { socket ->
+                    protect(socket)
+                    socket.soTimeout = 1200
+                    val fallbackPacket = DatagramPacket(raw, dnsOffset, dnsLen, FALLBACK_DNS, 53)
+                    socket.send(fallbackPacket)
+
+                    val respBuf = ByteArray(1500)
+                    val respPacket = DatagramPacket(respBuf, respBuf.size)
+                    socket.receive(respPacket)
+                    respData = respBuf.copyOf(respPacket.length)
+                    resolved = true
+                }
+            } catch (e: Exception) {
+                // Fallback timed out or unreachable
+            }
+        }
+
+        if (resolved && respData != null) {
+            try {
                 val fullPacket = buildIpUdpPacket(
-                    srcIp = byteArrayOf(10, 0, 0, 2),
-                    dstIp = byteArrayOf(10, 0, 0, 2),
+                    srcIp = dstIpBytes,
+                    dstIp = srcIpBytes,
                     srcPort = 53,
                     dstPort = clientPort,
-                    payload = dnsData
+                    payload = respData!!
                 )
-                outputStream.write(fullPacket)
-            } catch (e2: Exception) {
-                // Timeout / drop
+                synchronized(outputLock) {
+                    outputStream.write(fullPacket)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
+        } else {
+            // CRITICAL: Respond immediately with SERVFAIL (RCODE 2) so Android netd fails fast
+            // instead of stalling client apps and browsers for 30s!
+            sendDnsErrorResponse(
+                raw = raw,
+                dnsOffset = dnsOffset,
+                dnsLen = dnsLen,
+                srcIpBytes = srcIpBytes,
+                dstIpBytes = dstIpBytes,
+                clientPort = clientPort,
+                rcode = 2, // SERVFAIL
+                outputStream = outputStream
+            )
+        }
+    }
+
+    private fun sendDnsErrorResponse(
+        raw: ByteArray,
+        dnsOffset: Int,
+        dnsLen: Int,
+        srcIpBytes: ByteArray,
+        dstIpBytes: ByteArray,
+        clientPort: Int,
+        rcode: Int,
+        outputStream: FileOutputStream
+    ) {
+        try {
+            if (dnsLen < 12) return
+            val txId0 = raw[dnsOffset]
+            val txId1 = raw[dnsOffset + 1]
+            val origFlags = ((raw[dnsOffset + 2].toInt() and 0xFF) shl 8) or (raw[dnsOffset + 3].toInt() and 0xFF)
+            val rd = origFlags and 0x0100 // preserve Recursion Desired bit
+
+            // Find question end
+            var qEnd = dnsOffset + 12
+            while (qEnd < dnsOffset + dnsLen && raw[qEnd].toInt() != 0) {
+                val len = raw[qEnd].toInt() and 0xFF
+                qEnd += 1 + len
+            }
+            qEnd += 5
+            if (qEnd > dnsOffset + dnsLen) qEnd = dnsOffset + dnsLen
+            val questionLen = (qEnd - (dnsOffset + 12)).coerceAtLeast(0)
+
+            val dnsResp = ByteBuffer.allocate(12 + questionLen)
+            dnsResp.put(txId0)
+            dnsResp.put(txId1)
+            // QR=1 (0x8000), RA=1 (0x0080), RD preserved, RCODE in lowest 4 bits
+            val responseFlags = (0x8180 or rd or (rcode and 0x0F)).toShort()
+            dnsResp.putShort(responseFlags)
+            dnsResp.putShort(1.toShort()) // QDCOUNT
+            dnsResp.putShort(0.toShort()) // ANCOUNT
+            dnsResp.putShort(0.toShort()) // NSCOUNT
+            dnsResp.putShort(0.toShort()) // ARCOUNT
+            if (questionLen > 0) {
+                dnsResp.put(raw, dnsOffset + 12, questionLen)
+            }
+
+            val respPacket = buildIpUdpPacket(
+                srcIp = dstIpBytes,
+                dstIp = srcIpBytes,
+                srcPort = 53,
+                dstPort = clientPort,
+                payload = dnsResp.array()
+            )
+            synchronized(outputLock) {
+                outputStream.write(respPacket)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
@@ -479,6 +620,7 @@ class TelemetryMonitorVpnService : VpnService() {
         }
         while ((sum ushr 16) > 0) {
             sum = (sum and 0xFFFF) + (sum ushr 16)
+            sum = (sum and 0xFFFF) + (sum ushr 16)
         }
         return (sum.inv()) and 0xFFFF
     }
@@ -513,9 +655,18 @@ class TelemetryMonitorVpnService : VpnService() {
     override fun onDestroy() {
         isRunning.set(false)
         workerThread?.interrupt()
-        dnsForwardSocket?.close()
+        try {
+            dnsExecutor?.shutdownNow()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         sinkholeServer?.stop()
-        vpnInterface?.close()
+        try {
+            vpnInterface?.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        vpnInterface = null
         super.onDestroy()
     }
 }
